@@ -693,6 +693,15 @@ config SND_SOC_AW88166
 	  digital Smart K audio amplifier with sound quality
 	  enhancement algorithms and speaker protection.
 
+config SND_SOC_AW88461
+	tristate "Soc Audio for awinic aw88461"
+	depends on I2C
+	select REGMAP_I2C
+	select SND_SOC_AW88395_LIB
+	help
+	  This option enables support for the awinic AW88461 (PID 0x2308)
+	  I2S/TDM smart amplifier, configured from an ACF register profile.
+
 config SND_SOC_AW88261
 	tristate "Soc Audio for awinic aw88261"
 	depends on I2C

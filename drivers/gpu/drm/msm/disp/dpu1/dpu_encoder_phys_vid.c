@@ -134,8 +134,16 @@ static void drm_mode_to_intf_timing_params(
 		 * TODO: replace drm_dsc_get_bpp_int with logic to handle
 		 * fractional part if there is fraction
 		 */
-		timing->width = timing->width * drm_dsc_get_bpp_int(dsc) /
-				(dsc->bits_per_component * 3);
+		/*
+		 * Round up, exactly like dsi_timing_setup() and
+		 * dsi_adjust_pclk_for_compression() do. Rounding down here
+		 * makes the INTF line one pclk shorter than the DSI line
+		 * whenever width * bpp is not a multiple of the source bpp
+		 * (e.g. 1472 * 8 / 30), and the two timing engines drift
+		 * apart by one pclk per line until the DSI FIFO overflows.
+		 */
+		timing->width = DIV_ROUND_UP(timing->width * drm_dsc_get_bpp_int(dsc),
+					     dsc->bits_per_component * 3);
 		timing->xres = timing->width;
 		timing->dce_bytes_per_line = msm_dsc_get_bytes_per_line(dsc);
 	}

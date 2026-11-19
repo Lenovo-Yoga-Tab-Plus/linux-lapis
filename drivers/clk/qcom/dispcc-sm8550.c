@@ -1627,6 +1627,12 @@ static struct gdsc mdss_gdsc = {
 	.gdscr = 0x9000,
 	.pd = {
 		.name = "mdss_gdsc",
+		/*
+		 * Let the display driver power-collapse the domain at probe to
+		 * get rid of the bootloader's state, instead of holding it on
+		 * until sync_state.
+		 */
+		.flags = GENPD_FLAG_NO_STAY_ON,
 	},
 	.pwrsts = PWRSTS_OFF_ON,
 	.flags = POLL_CFG_GDSCR | HW_CTRL | RETAIN_FF_ENABLE,

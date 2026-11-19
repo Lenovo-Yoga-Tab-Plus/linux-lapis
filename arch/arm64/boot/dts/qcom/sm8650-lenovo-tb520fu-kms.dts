@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * TB520FU KMS: full MDSS/DSI panel path and Adreno GPU, DP still off.
+ * (The early "hang after GMU load" was the panel VDDIO rail, not the GPU.)
+ */
+
+#include "sm8650-lenovo-tb520fu-simplefb.dts"
+
+&framebuffer0 {
+	status = "disabled";
+};
+
+&mdss {
+	status = "okay";
+};
+
+&dispcc {
+	status = "okay";
+};
+
+&mmss_noc {
+	status = "okay";
+};
+
+&mdss_dp0 {
+	status = "disabled";
+};
+
+&spi4 {
+	touchscreen@0 {
+		panel = <&panel>;
+	};
+};

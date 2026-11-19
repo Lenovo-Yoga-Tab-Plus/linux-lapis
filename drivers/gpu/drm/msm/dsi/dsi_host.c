@@ -1881,6 +1881,7 @@ static int dsi_host_parse_lane_data(struct msm_dsi_host *msm_host,
 
 static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc)
 {
+	u8 first_line_bpg_override;
 	int ret;
 
 	if (dsc->bits_per_pixel & 0xf) {
@@ -1909,15 +1910,31 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
 	dsc->convert_rgb = 1;
 	dsc->vbr_enable = 0;
 
+	/*
+	 * Panel drivers may pre-set first_line_bpg_offset when the panel's
+	 * private DSC tuning (e.g. Novatek 0x91) was generated with a value
+	 * that differs from the PRE_SCR table. Preserve that override.
+	 */
+	first_line_bpg_override = dsc->first_line_bpg_offset;
+
 	drm_dsc_set_const_params(dsc);
 	drm_dsc_set_rc_buf_thresh(dsc);
 
-	/* DPU supports only pre-SCR panels */
-	ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_1_PRE_SCR);
+	/*
+	 * Default to the pre-SCR set. Panels whose decoder was tuned against
+	 * the DSC v1.1 SCR tables need those instead; they are identical to
+	 * the DSC v1.2 RGB 4:4:4 recommendations.
+	 */
+	ret = drm_dsc_setup_rc_params(dsc,
+				      (msm_host->mode_flags & MIPI_DSI_MODE_DSC_1_1_SCR) ?
+				      DRM_DSC_1_2_444 : DRM_DSC_1_1_PRE_SCR);
 	if (ret) {
 		DRM_DEV_ERROR(&msm_host->pdev->dev, "could not find DSC RC parameters\n");
 		return ret;
 	}
+
+	if (first_line_bpg_override)
+		dsc->first_line_bpg_offset = first_line_bpg_override;
 
 	dsc->initial_scale_value = drm_dsc_initial_scale_value(dsc);
 	dsc->line_buf_depth = dsc->bits_per_component + 1;

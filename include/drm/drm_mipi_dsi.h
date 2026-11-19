@@ -140,6 +140,11 @@ struct mipi_dsi_host *of_find_mipi_dsi_host_by_node(struct device_node *node);
 #define MIPI_DSI_HS_PKT_END_ALIGNED	BIT(12)
 /* pack all DSC slices for a line into a single packet */
 #define MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT	BIT(13)
+/*
+ * panel DSC decoder is tuned for the DSC v1.1 SCR rate-control parameters
+ * (downstream "qcom,mdss-dsc-scr-version = <1>") instead of the pre-SCR set
+ */
+#define MIPI_DSI_MODE_DSC_1_1_SCR	BIT(14)
 
 enum mipi_dsi_pixel_format {
 	MIPI_DSI_FMT_RGB888,

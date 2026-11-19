@@ -316,6 +316,18 @@ config KEYBOARD_HP7XX
 	  To compile this driver as a module, choose M here: the
 	  module will be called jornada720_kbd.
 
+config KEYBOARD_LENOVO_TB520FU_POGO
+	tristate "Lenovo Yoga Tab Plus pogo keyboard and touchpad"
+	depends on SERIAL_DEV_BUS
+	depends on GPIOLIB
+	help
+	  Enable support for the keyboard cover and multitouch touchpad
+	  of the Lenovo Yoga Tab Plus (TB520FU), connected through the
+	  pogo pins on a half-duplex UART.
+
+	  This driver can be built as a module. If so, the module will be
+	  called lenovo-tb520fu-pogo.
+
 config KEYBOARD_LM8323
 	tristate "LM8323 keypad chip"
 	depends on I2C

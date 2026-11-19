@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Phase 1 Safe Bring-Up Variant for Lenovo Yoga Tab Plus (TB520FU / lapis):
+ * - Keeps ABL bootloader scanout alive via simple-framebuffer (0xd5100000)
+ * - Forces DWC3 USB controller into peripheral mode so configfs USB Gadget
+ *   (ttyACM0 serial + USB NCM networking + SSH) comes up immediately at boot
+ *   without depending on ADSP / pmic-glink role switching.
+ * - Retains UFS 4.0, RPMh regulators, WCN7850 Wi-Fi/BT, SPI touch, and keys.
+ */
+
+#include "sm8650-lenovo-tb520fu.dts"
+
+/*
+ * Keep pmic-glink for ADSP battmgr (battery/charger), but drop the Type-C
+ * connector graph so UCSI/altmode never drive the USB role away from gadget.
+ */
+/ {
+	pmic-glink {
+		/delete-property/ orientation-gpios;
+		/delete-node/ connector@0;
+	};
+};
+
+/delete-node/ &wcd_usbss;
+
+/*
+ * With dispcc disabled nothing votes for MMCX, so rpmhpd sync_state drops the
+ * ABL vote while MDP/DSI keep running at ABL clock rates.
+ */
+&framebuffer0 {
+	power-domains = <&rpmhpd RPMHPD_MMCX>;
+	required-opps = <&rpmhpd_opp_nom_l1>;
+	status = "okay";
+};
+
+&mdss {
+	status = "disabled";
+};
+
+/*
+ * dispcc probe reprograms DISP_CC_PLL0/1 under the running ABL scanout, and
+ * mmss_noc sync_state drops the MDP bandwidth vote; either blanks the panel.
+ */
+&dispcc {
+	status = "disabled";
+};
+
+&mmss_noc {
+	status = "disabled";
+};
+
+&iris {
+	status = "disabled";
+};
+
+&i2c3 {
+	status = "disabled";
+};
+
+/* No DSI panel driver under simplefb; ABL leaves the TDDI powered, so start touch directly. */
+&spi4 {
+	touchscreen@0 {
+		/delete-property/ panel;
+	};
+};
+
+&usb_1 {
+	/delete-property/ mode-switch;
+	/delete-property/ usb-role-switch;
+	dr_mode = "peripheral";
+};
+
+&usb_1_dwc3_hs {
+	/delete-property/ remote-endpoint;
+};
+
+&usb_dp_qmpphy_out {
+	/delete-property/ remote-endpoint;
+};

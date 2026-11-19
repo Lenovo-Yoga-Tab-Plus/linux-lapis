@@ -1694,6 +1694,12 @@ static void ov13b10_remove(struct i2c_client *client)
 static DEFINE_RUNTIME_DEV_PM_OPS(ov13b10_pm_ops, ov13b10_suspend,
 				 ov13b10_resume, NULL);
 
+static const struct of_device_id ov13b10_of_match[] = {
+	{ .compatible = "ovti,ov13b10" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, ov13b10_of_match);
+
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id ov13b10_acpi_ids[] = {
 	{"OVTIDB10"},
@@ -1709,6 +1715,7 @@ static struct i2c_driver ov13b10_i2c_driver = {
 	.driver = {
 		.name = "ov13b10",
 		.pm = pm_ptr(&ov13b10_pm_ops),
+		.of_match_table = ov13b10_of_match,
 		.acpi_match_table = ACPI_PTR(ov13b10_acpi_ids),
 	},
 	.probe = ov13b10_probe,

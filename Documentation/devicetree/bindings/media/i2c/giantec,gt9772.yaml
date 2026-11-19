@@ -12,7 +12,9 @@ maintainers:
 
 properties:
   compatible:
-    const: giantec,gt9772
+    enum:
+      - giantec,gt9772
+      - giantec,gt9772b
 
   reg:
     maxItems: 1
@@ -23,8 +25,19 @@ properties:
 required:
   - compatible
   - reg
-  - vio-supply
   - vaf-supply
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: giantec,gt9772
+    then:
+      required:
+        - vio-supply
+    else:
+      properties:
+        vio-supply: false
 
 additionalProperties: false
 ...

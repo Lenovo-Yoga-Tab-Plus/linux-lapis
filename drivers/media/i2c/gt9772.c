@@ -6,6 +6,10 @@
  * Register programming and the DAC protocol are derived from Qualcomm's
  * GT9772 actuator description.  Caihong places this actuator on CCI0 master 1
  * at downstream 8-bit slave address 0x18 (Linux 7-bit address 0x0c).
+ *
+ * The GT9772B on the Lenovo TB520FU main camera shares the DAC protocol but
+ * has a single supply and its own initialization table, taken from the
+ * vendor actuator description for that module.
  */
 
 #include <linux/delay.h>
@@ -33,6 +37,12 @@
 
 #define GT9772_MAX_FOCUS_POS		1023
 #define GT9772_DEFAULT_FOCUS_POS	336
+/*
+ * The TB520FU module calibration (EEPROM) puts infinity near code 210 and
+ * macro near code 480.  Nothing drives autofocus yet, so rest slightly on
+ * the near side of infinity where most of the scene is acceptably sharp.
+ */
+#define GT9772B_DEFAULT_FOCUS_POS	220
 #define GT9772_PARK_FOCUS_POS		40
 #define GT9772_RAMP_STEP		16
 #define GT9772_RAMP_DELAY_US		7000
@@ -40,18 +50,28 @@
 #define GT9772_INIT_WRITE_DELAY_US	100
 #define GT9772_POWER_DOWN_DELAY_US	1000
 
+struct gt9772_variant {
+	const struct cci_reg_sequence *init_regs;
+	unsigned int num_init_regs;
+	unsigned int init_write_delay_us;
+	unsigned int num_supplies;
+	unsigned int default_focus;
+};
+
 struct gt9772 {
 	struct device *dev;
 	struct regmap *regmap;
+	const struct gt9772_variant *variant;
 	struct regulator_bulk_data supplies[2];
 	struct v4l2_subdev sd;
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *focus;
 };
 
+/* The GT9772B only has VAF, so it has to come first. */
 static const char * const gt9772_supply_names[] = {
-	"vio",
 	"vaf",
+	"vio",
 };
 
 static const struct cci_reg_sequence gt9772_init_regs[] = {
@@ -59,6 +79,31 @@ static const struct cci_reg_sequence gt9772_init_regs[] = {
 	{ GT9772_REG_CFG_06, GT9772_CFG_06_VALUE },
 	{ GT9772_REG_CFG_07, GT9772_CFG_07_VALUE },
 	{ GT9772_REG_CFG_08, GT9772_CFG_08_VALUE },
+};
+
+static const struct cci_reg_sequence gt9772b_init_regs[] = {
+	{ CCI_REG8(0x0b), 0x53 },
+	{ CCI_REG8(0x02), 0x02 },
+	{ CCI_REG8(0x06), 0x00 },
+	{ CCI_REG8(0x07), 0x7c },
+};
+
+static const struct gt9772_variant gt9772_variant = {
+	.init_regs = gt9772_init_regs,
+	.num_init_regs = ARRAY_SIZE(gt9772_init_regs),
+	/* Qualcomm's GT9772 table specifies 100 us after each write. */
+	.init_write_delay_us = GT9772_INIT_WRITE_DELAY_US,
+	.num_supplies = 2,
+	.default_focus = GT9772_DEFAULT_FOCUS_POS,
+};
+
+static const struct gt9772_variant gt9772b_variant = {
+	.init_regs = gt9772b_init_regs,
+	.num_init_regs = ARRAY_SIZE(gt9772b_init_regs),
+	/* The vendor table asks for 1 ms after the first write only. */
+	.init_write_delay_us = 1000,
+	.num_supplies = 1,
+	.default_focus = GT9772B_DEFAULT_FOCUS_POS,
 };
 
 static inline struct gt9772 *to_gt9772(struct v4l2_subdev *sd)
@@ -74,18 +119,18 @@ static int gt9772_write_focus(struct gt9772 *gt9772, unsigned int value)
 
 static int gt9772_hw_init(struct gt9772 *gt9772)
 {
+	const struct gt9772_variant *variant = gt9772->variant;
 	unsigned int i;
 	int ret;
 
-	for (i = 0; i < ARRAY_SIZE(gt9772_init_regs); i++) {
-		ret = cci_write(gt9772->regmap, gt9772_init_regs[i].reg,
-				gt9772_init_regs[i].val, NULL);
+	for (i = 0; i < variant->num_init_regs; i++) {
+		ret = cci_write(gt9772->regmap, variant->init_regs[i].reg,
+				variant->init_regs[i].val, NULL);
 		if (ret)
 			return ret;
 
-		/* Qualcomm's GT9772 table specifies 100 us after each write. */
-		usleep_range(GT9772_INIT_WRITE_DELAY_US,
-			     GT9772_INIT_WRITE_DELAY_US + 100);
+		usleep_range(variant->init_write_delay_us,
+			     variant->init_write_delay_us + 100);
 	}
 
 	return 0;
@@ -101,7 +146,7 @@ static int gt9772_power_on(struct gt9772 *gt9772)
 	 * enabling the two board rails together here preserves the board DT
 	 * requirement while keeping that settle time.
 	 */
-	ret = regulator_bulk_enable(ARRAY_SIZE(gt9772->supplies),
+	ret = regulator_bulk_enable(gt9772->variant->num_supplies,
 				    gt9772->supplies);
 	if (ret)
 		return ret;
@@ -111,7 +156,7 @@ static int gt9772_power_on(struct gt9772 *gt9772)
 	ret = gt9772_hw_init(gt9772);
 	if (ret) {
 		dev_err(gt9772->dev, "failed to initialize VCM: %d\n", ret);
-		regulator_bulk_disable(ARRAY_SIZE(gt9772->supplies),
+		regulator_bulk_disable(gt9772->variant->num_supplies,
 				       gt9772->supplies);
 	}
 
@@ -122,7 +167,7 @@ static int gt9772_power_off(struct gt9772 *gt9772)
 {
 	int ret;
 
-	ret = regulator_bulk_disable(ARRAY_SIZE(gt9772->supplies),
+	ret = regulator_bulk_disable(gt9772->variant->num_supplies,
 				     gt9772->supplies);
 	usleep_range(GT9772_POWER_DOWN_DELAY_US,
 		     GT9772_POWER_DOWN_DELAY_US + 500);
@@ -243,6 +288,10 @@ static int gt9772_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	gt9772->dev = &client->dev;
+	gt9772->variant = i2c_get_match_data(client);
+	if (!gt9772->variant)
+		return -ENODEV;
+
 	gt9772->regmap = devm_cci_regmap_init_i2c(client, 8);
 	if (IS_ERR(gt9772->regmap))
 		return PTR_ERR(gt9772->regmap);
@@ -251,7 +300,7 @@ static int gt9772_probe(struct i2c_client *client)
 		gt9772->supplies[i].supply = gt9772_supply_names[i];
 
 	ret = devm_regulator_bulk_get(&client->dev,
-				       ARRAY_SIZE(gt9772->supplies),
+				       gt9772->variant->num_supplies,
 				       gt9772->supplies);
 	if (ret)
 		return dev_err_probe(&client->dev, ret,
@@ -265,7 +314,7 @@ static int gt9772_probe(struct i2c_client *client)
 	gt9772->focus = v4l2_ctrl_new_std(&gt9772->ctrls, &gt9772_ctrl_ops,
 					  V4L2_CID_FOCUS_ABSOLUTE,
 					  0, GT9772_MAX_FOCUS_POS, 1,
-					  GT9772_DEFAULT_FOCUS_POS);
+					  gt9772->variant->default_focus);
 	if (gt9772->ctrls.error) {
 		ret = gt9772->ctrls.error;
 		goto err_free_ctrls;
@@ -285,7 +334,7 @@ static int gt9772_probe(struct i2c_client *client)
 	if (ret)
 		goto err_cleanup_media;
 
-	ret = gt9772_write_focus(gt9772, GT9772_DEFAULT_FOCUS_POS);
+	ret = gt9772_write_focus(gt9772, gt9772->variant->default_focus);
 	if (ret) {
 		dev_err(&client->dev, "failed initial focus write: %d\n", ret);
 		gt9772_power_off(gt9772);
@@ -334,13 +383,15 @@ static void gt9772_remove(struct i2c_client *client)
 }
 
 static const struct of_device_id gt9772_of_match[] = {
-	{ .compatible = "giantec,gt9772" },
+	{ .compatible = "giantec,gt9772", .data = &gt9772_variant },
+	{ .compatible = "giantec,gt9772b", .data = &gt9772b_variant },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, gt9772_of_match);
 
 static const struct i2c_device_id gt9772_i2c_ids[] = {
-	{ "gt9772" },
+	{ "gt9772", (kernel_ulong_t)&gt9772_variant },
+	{ "gt9772b", (kernel_ulong_t)&gt9772b_variant },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, gt9772_i2c_ids);

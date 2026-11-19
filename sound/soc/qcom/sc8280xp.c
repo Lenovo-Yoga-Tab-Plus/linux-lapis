@@ -644,6 +644,7 @@ static const struct qcom_snd_soc_common sm8750_priv_data = {
 
 static const struct of_device_id snd_sc8280xp_dt_match[] = {
 	{ .compatible = "ayaneo,pocket-s2-sndcard", .data = &ayaneo_ps2_priv_data },
+	{ .compatible = "lenovo,tb520fu-sndcard", .data = &caihong_priv_data },
 	{ .compatible = "oneplus,caihong-sndcard", .data = &caihong_priv_data },
 	{ .compatible = "qcom,eliza-sndcard", .data = &eliza_priv_data },
 	{ .compatible = "qcom,hawi-sndcard", .data = &hawi_priv_data },

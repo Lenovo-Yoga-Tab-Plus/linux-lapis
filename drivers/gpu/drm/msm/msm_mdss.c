@@ -480,6 +480,28 @@ static int mdss_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, mdss);
 
 	/*
+	 * The block reset in msm_mdss_init() does not return the MDP register
+	 * file to its reset values: on SM8650 the bootloader's splash pipeline
+	 * configuration is still there afterwards. The power domain was powered
+	 * on when it was attached, and the first modeset can run from inside
+	 * the component bind (fbdev emulation), i.e. while the driver core
+	 * still holds the MDSS runtime-active on behalf of a probing child. In
+	 * that case the hardware would never be power-collapsed between the
+	 * bootloader and the first modeset, and a DSI panel fails to
+	 * initialize on the inherited state.
+	 *
+	 * Run one runtime PM cycle before any child exists so that the domain
+	 * is collapsed and everything below starts from hardware reset state.
+	 */
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret) {
+		DRM_DEV_ERROR(dev, "failed to power-cycle MDSS: %d\n", ret);
+		msm_mdss_destroy(mdss);
+		return ret;
+	}
+	pm_runtime_put_sync_suspend(dev);
+
+	/*
 	 * MDP5/DPU based devices don't have a flat hierarchy. There is a top
 	 * level parent: MDSS, and children: MDP5/DPU, DSI, HDMI, eDP etc.
 	 * Populate the children devices, find the MDP5/DPU node, and then add

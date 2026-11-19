@@ -61,6 +61,17 @@ struct ktz8866 {
 	struct ktz8866_slave *slave;
 	bool led_on;
 	bool led_state_valid;
+
+	/* Board tuning, see ktz8866_parse_dt(). Negative means "leave as is". */
+	u32 bl_cfg1;
+	int bl_cfg2;
+	int bl_dimming;
+	int pwm_ramp_time;
+	u32 sinks;
+	u32 boost_cfg;
+	u32 outp_cfg;
+	u32 outn_cfg;
+	bool bias_primary_only;
 };
 
 /* For debug purpose */
@@ -138,11 +149,15 @@ static void bl_ic_ktz8866_set_lcd_bias_by_gpio(bool enable)
 	int val = enable ? 1 : 0;
 
 	if (enable) {
-		/* Dual LCD Bias Power registers */
-		ktz8866_ic_write_byte_dual(0x0C, 0x30);/* LCD_BOOST_CFG */
-		ktz8866_ic_write_byte_dual(0x0D, 0x28);/* OUTP_CFG，OUTP = 6V */
-		ktz8866_ic_write_byte_dual(0x0E, 0x28);/* OUTN_CFG，OUTN = -6V */
-		ktz8866_ic_write_byte_dual(0x09, 0x9f);/* Enable OUT OUTN */
+		void (*wr)(unsigned int reg, unsigned int val) =
+			priv->bias_primary_only ? ktz8866_ic_write_byte_single :
+						  ktz8866_ic_write_byte_dual;
+
+		/* LCD Bias Power registers */
+		wr(LCD_BOOST_CFG, priv->boost_cfg);
+		wr(OUTP_CFG, priv->outp_cfg);
+		wr(OUTN_CFG, priv->outn_cfg);
+		wr(LCD_BIAS_CFG1, LCD_BIAS_EN);	/* Enable OUTP/OUTN */
 		mdelay(1);
 	}
 
@@ -168,18 +183,33 @@ static int bl_ic_ktz8866_enable(struct ktz8866 *ktz, bool enable)
 	 */
 	if (enable) {
 		/* LED Backlight Driver regisers */
-		/* BL_CFG1: OVP=34.0V, linear BLED, PWM Disabled */
-		ret = ktz8866_write(ktz, BL_CFG1, 0xda);
+		if (ktz->bl_cfg2 >= 0) {
+			ret = ktz8866_write(ktz, BL_CFG2, ktz->bl_cfg2);
+			if (ret)
+				goto error;
+		}
+		/* BL_CFG1: OVP, BLED mapping, PWM input enable */
+		ret = ktz8866_write(ktz, BL_CFG1, ktz->bl_cfg1);
 		if (ret)
 			goto error;
+		if (ktz->bl_dimming >= 0) {
+			ret = ktz8866_write(ktz, BL_DIMMING, ktz->bl_dimming);
+			if (ret)
+				goto error;
+		}
 		/* BL_OPTION2: inductance 4.7uH, BL_CURRENT_LIMIT 2.5A */
 		ret = ktz8866_write(ktz, BL_OPTION2, 0x37);
 		if (ret)
 			goto error;
-		/* enable backlight and 4 / 6 backlihgt regions */
+		if (ktz->pwm_ramp_time >= 0) {
+			ret = ktz8866_write(ktz, PWM_RAMP_TIME, ktz->pwm_ramp_time);
+			if (ret)
+				goto error;
+		}
+		/* enable backlight and the populated current sinks */
 		ret = ktz8866_update_bits(ktz, BL_EN,
 					  BL_EN_BIT | CURRENT_SINKS_MASK,
-					  BL_EN_BIT | GENMASK(3, 0));
+					  BL_EN_BIT | ktz->sinks);
 	} else {
 		ret = ktz8866_write(ktz, BL_EN, 0);
 	}
@@ -253,8 +283,13 @@ static int ktz8866_slave_register(struct ktz8866 *ktz)
 
 	client = of_find_i2c_device_by_node(np);
 	of_node_put(np);
+	/*
+	 * The secondary IC sits on another I2C bus which may not have probed
+	 * yet. Running without it leaves half of the LED strings in whatever
+	 * state the bootloader left them, so wait for it instead.
+	 */
 	if (!client)
-		return 0;
+		return -EPROBE_DEFER;
 
 	slave = devm_kzalloc(dev, sizeof(*slave), GFP_KERNEL);
 	if (!slave)
@@ -271,6 +306,45 @@ static int ktz8866_slave_register(struct ktz8866 *ktz)
 	ktz->slave = slave;
 
 	return 0;
+}
+
+static void ktz8866_parse_dt(struct ktz8866 *ktz)
+{
+	struct device *dev = &ktz->client->dev;
+	u32 val;
+
+	/* Defaults match the values this driver used to hardcode. */
+	ktz->bl_cfg1 = 0xda;
+	ktz->bl_cfg2 = -1;
+	ktz->bl_dimming = -1;
+	ktz->pwm_ramp_time = -1;
+	ktz->sinks = GENMASK(3, 0);
+	ktz->boost_cfg = 0x30;
+	ktz->outp_cfg = 0x28;	/* 6.0 V */
+	ktz->outn_cfg = 0x28;	/* -6.0 V */
+
+	if (!device_property_read_u32(dev, "kinetic,bl-cfg1", &val))
+		ktz->bl_cfg1 = val & 0xff;
+	if (!device_property_read_u32(dev, "kinetic,bl-cfg2", &val))
+		ktz->bl_cfg2 = val & 0xff;
+	if (!device_property_read_u32(dev, "kinetic,bl-dimming", &val))
+		ktz->bl_dimming = val & 0xff;
+	if (!device_property_read_u32(dev, "kinetic,pwm-ramp-time", &val))
+		ktz->pwm_ramp_time = val & 0xff;
+	if (!device_property_read_u32(dev, "kinetic,lcd-boost-cfg", &val))
+		ktz->boost_cfg = val & 0xff;
+	if (!device_property_read_u32(dev, "current-num-sinks", &val) &&
+	    val >= 1 && val <= 6)
+		ktz->sinks = GENMASK(val - 1, 0);
+	/* OUTP/OUTN: 4.0 V + 50 mV per step */
+	if (!device_property_read_u32(dev, "vddpos-microvolt", &val) &&
+	    val >= 4000000 && val <= 6500000)
+		ktz->outp_cfg = (val - 4000000) / 50000;
+	if (!device_property_read_u32(dev, "vddneg-microvolt", &val) &&
+	    val >= 4000000 && val <= 6500000)
+		ktz->outn_cfg = (val - 4000000) / 50000;
+	ktz->bias_primary_only =
+		device_property_read_bool(dev, "kinetic,lcd-bias-primary-only");
 }
 
 static void reg_dump(struct ktz8866 *ktz, char *buf)
@@ -345,6 +419,14 @@ static int ktz8866_probe(struct i2c_client *client)
 	if (IS_ERR(ktz->regmap))
 		return dev_err_probe(&client->dev, PTR_ERR(ktz->regmap), "failed to init regmap\n");
 
+	ktz8866_parse_dt(ktz);
+
+	/* May defer; do it before touching GPIOs or registering anything. */
+	ret = ktz8866_slave_register(ktz);
+	if (ret)
+		return dev_err_probe(&client->dev, ret,
+				     "failed to register slave\n");
+
 	ktz->enable_gpio = devm_gpiod_get_optional(&client->dev, "enable", GPIOD_OUT_HIGH);
 	if (IS_ERR(ktz->enable_gpio))
 		return PTR_ERR(ktz->enable_gpio);
@@ -368,17 +450,13 @@ static int ktz8866_probe(struct i2c_client *client)
 		return dev_err_probe(&client->dev, PTR_ERR(backlight_dev),
 				"failed to register backlight device\n");
 
-	ret = ktz8866_slave_register(ktz);
-	if (ret)
-		return dev_err_probe(&client->dev, ret,
-				     "failed to register slave\n");
-
 	i2c_set_clientdata(client, backlight_dev);
 
 	priv = ktz;
 	ktz8866_init(ktz);
 
-	dev_warn(&client->dev, "initialized\n");
+	dev_info(&client->dev, "initialized, secondary %s, sinks 0x%02x, cfg1 0x%02x\n",
+		 ktz->slave ? "present" : "absent", ktz->sinks, ktz->bl_cfg1);
 
 	return 0;
 }
@@ -391,7 +469,8 @@ static void ktz8866_remove(struct i2c_client *client)
 	bd->props.brightness = 0;
 	backlight_update_status(bd);
 
-	regmap_exit(ktz->slave->regmap);
+	if (ktz->slave)
+		regmap_exit(ktz->slave->regmap);
 }
 
 static const struct i2c_device_id ktz8866_ids[] = {

@@ -1199,11 +1199,17 @@ static const struct of_device_id nt36532e_of_match[] = {
 	{}
 };
 MODULE_DEVICE_TABLE(of, nt36532e_of_match);
+static const struct spi_device_id nt36532e_spi_ids[] = {
+	{ "nt36532e" },
+	{}
+};
+MODULE_DEVICE_TABLE(spi, nt36532e_spi_ids);
 static struct spi_driver nt36532e_driver = {
 	.driver = { .name = "nt36532e",
 		    .of_match_table = nt36532e_of_match,
 		    .pm = pm_sleep_ptr(&nt36532e_pm),
 		    .dev_groups = nvt_groups },
+	.id_table = nt36532e_spi_ids,
 	.probe = nt36532e_probe
 };
 module_spi_driver(nt36532e_driver);

@@ -12,6 +12,7 @@
 #include <sound/soc-dpcm.h>
 #include <uapi/sound/snd_ar_tokens.h>
 #include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/wait.h>
 #include "q6apm.h"
 #include "audioreach.h"
@@ -1015,7 +1016,15 @@ static int audioreach_widget_load_pga(struct snd_soc_component *component,
 
 	dobj = &w->dobj;
 	mod = dobj->private;
-	mod->gain = VOL_CTRL_DEFAULT_GAIN;
+	/*
+	 * Q13, so 0x2000 is 0 dB and 0x4000 is +6 dB. The speaker stream is
+	 * vol_ctrl1. Android drives that path hotter than unity; the Awinic
+	 * profile still limits the amplifiers.
+	 */
+	if (w->name && strends(w->name, "vol_ctrl1"))
+		mod->gain = 0x4000;
+	else
+		mod->gain = VOL_CTRL_DEFAULT_GAIN;
 
 	ret = snd_soc_tplg_widget_bind_event(w, audioreach_widget_ops,
 					     ARRAY_SIZE(audioreach_widget_ops),
@@ -1318,6 +1327,12 @@ static int audioreach_put_vol_ctrl_audio_mixer(struct snd_kcontrol *kcontrol,
 	struct audioreach_module *mod = dw->dobj.private;
 
 	mod->gain = ucontrol->value.integer.value[0];
+	if (dw->power) {
+		struct snd_soc_component *c = snd_soc_dapm_to_component(dw->dapm);
+		struct q6apm *apm = dev_get_drvdata(c->dev);
+
+		audioreach_gain_set_vol_ctrl(apm, mod, mod->gain);
+	}
 
 	return 1;
 }

@@ -50,6 +50,7 @@ obj-$(CONFIG_KEYBOARD_NEWTON)		+= newtonkbd.o
 obj-$(CONFIG_KEYBOARD_NSPIRE)		+= nspire-keypad.o
 obj-$(CONFIG_KEYBOARD_OMAP)		+= omap-keypad.o
 obj-$(CONFIG_KEYBOARD_OMAP4)		+= omap4-keypad.o
+obj-$(CONFIG_KEYBOARD_LENOVO_TB520FU_POGO)	+= lenovo-tb520fu-pogo.o
 obj-$(CONFIG_KEYBOARD_ONEPLUS_POGO)	+= oneplus_pogo.o
 obj-$(CONFIG_KEYBOARD_OPENCORES)	+= opencores-kbd.o
 obj-$(CONFIG_KEYBOARD_PINEPHONE)	+= pinephone-keyboard.o
