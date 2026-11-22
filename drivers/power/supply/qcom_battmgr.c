@@ -108,6 +108,9 @@ enum qcom_battmgr_variant {
 #define WLS_BOOST_EN			6
 
 #define BATTMGR_CHG_CTRL_LIMIT_EN	0x48
+
+#define BATTMGR_HQ_PROPERTY_GET		0x60
+#define BATTMGR_HQ_PROPERTY_SET		0x61
 #define CHARGE_CTRL_START_THR_MIN	50
 #define CHARGE_CTRL_START_THR_MAX	95
 #define CHARGE_CTRL_END_THR_MIN		55
@@ -1620,6 +1623,14 @@ static void qcom_battmgr_callback(const void *data, size_t len, void *priv)
 	unsigned int opcode = le32_to_cpu(hdr->opcode);
 
 	if (qcom_battmgr_caihong_handle_response(battmgr, data, len))
+		return;
+
+	/*
+	 * Replies to the Lenovo/Huaqin vendor property opcodes belong to the
+	 * TB520FU pen dock client, which shares this owner ID. They must not
+	 * complete a pending battery manager request.
+	 */
+	if (opcode == BATTMGR_HQ_PROPERTY_GET || opcode == BATTMGR_HQ_PROPERTY_SET)
 		return;
 
 	if (opcode == BATTMGR_NOTIFICATION)
