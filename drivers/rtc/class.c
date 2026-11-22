@@ -72,6 +72,15 @@ static void rtc_hctosys(struct rtc_device *rtc)
 
 	tv64.tv_sec = rtc_tm_to_time64(&tm);
 
+	/*
+	 * An unset PMIC counter reads back as 1971. Applying that would pull
+	 * the system clock off the time userspace restores on the next boot.
+	 */
+	if (tm.tm_year + 1900 < 2024) {
+		err = -EINVAL;
+		goto err_read;
+	}
+
 #if BITS_PER_LONG == 32
 	if (tv64.tv_sec > INT_MAX) {
 		err = -ERANGE;
