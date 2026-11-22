@@ -124,6 +124,7 @@ struct tbkb {
 	struct input_dev *keyboard;
 	struct input_dev *touchpad;
 	bool connected;
+	bool stopped;
 	bool capslock;
 
 	struct work_struct connect_work;
@@ -260,7 +261,7 @@ static int tbkb_create_inputs(struct tbkb *kb)
 	tp->dev.parent = kb->dev;
 
 	input_set_capability(tp, EV_KEY, BTN_LEFT);
-	input_set_capability(tp, EV_KEY, BTN_RIGHT);
+	/* A clickpad must not advertise BTN_RIGHT. libinput drops the device. */
 	input_set_abs_params(tp, ABS_MT_POSITION_X, 0, TBKB_TP_X_MAX, 0, 0);
 	input_set_abs_params(tp, ABS_MT_POSITION_Y, 0, TBKB_TP_Y_MAX, 0, 0);
 	input_abs_set_res(tp, ABS_MT_POSITION_X, TBKB_TP_RES);
@@ -426,8 +427,7 @@ static void tbkb_report_touch(struct tbkb *kb, const u8 *rep, size_t len)
 	}
 
 	input_mt_sync_frame(input);
-	input_report_key(input, BTN_LEFT, rep[1] & BIT(0));
-	input_report_key(input, BTN_RIGHT, rep[1] & BIT(1));
+	input_report_key(input, BTN_LEFT, rep[1] & (BIT(0) | BIT(1)));
 	input_sync(input);
 }
 
@@ -438,7 +438,7 @@ static void tbkb_handle_packet(struct tbkb *kb, const u8 *pkt, size_t len)
 
 	/* The cover stops syncing while idle, so only the plug sensor disconnects it. */
 	if (pkt[0] == TBKB_EVT_SYNC) {
-		if (!kb->connected)
+		if (!READ_ONCE(kb->stopped) && !kb->connected)
 			schedule_work(&kb->connect_work);
 		return;
 	}
@@ -571,7 +571,8 @@ static irqreturn_t tbkb_plug_irq(int irq, void *data)
 {
 	struct tbkb *kb = data;
 
-	mod_delayed_work(system_dfl_wq, &kb->plug_work, msecs_to_jiffies(50));
+	if (!READ_ONCE(kb->stopped))
+		mod_delayed_work(system_dfl_wq, &kb->plug_work, msecs_to_jiffies(50));
 	return IRQ_HANDLED;
 }
 
@@ -579,6 +580,7 @@ static void tbkb_cleanup(void *data)
 {
 	struct tbkb *kb = data;
 
+	WRITE_ONCE(kb->stopped, true);
 	cancel_delayed_work_sync(&kb->plug_work);
 	cancel_work_sync(&kb->connect_work);
 	cancel_work_sync(&kb->led_work);
