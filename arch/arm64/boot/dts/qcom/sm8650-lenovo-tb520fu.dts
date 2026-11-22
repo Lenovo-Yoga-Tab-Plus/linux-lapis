@@ -248,12 +248,31 @@
 			alignment = <0x0 0x200000>;
 			reusable;
 		};
+
+		/*
+		 * Staging heap for QSEE trusted-app images. The secure world
+		 * accepts an image only from a 4 MiB-aligned region that has
+		 * been shared as a whole, which is how Android's qseecom
+		 * driver publishes qseecom_ta_region (16 MiB).
+		 */
+		qseecom_ta_mem: qseecom-ta-region {
+			compatible = "shared-dma-pool";
+			alloc-ranges = <0x0 0x0 0x0 0xffffffff>;
+			size = <0x0 0x1000000>;
+			alignment = <0x0 0x400000>;
+			reusable;
+		};
 	};
 
 	gunyah_cma: gunyah-cma-vm-mem {
 		compatible = "gunyah-cma-vm-mem";
 		memory-region = <&gunyah_cma_mem>;
 		memory-region-names = "system-cma";
+	};
+
+	qseecom_ta_heap: qseecom-ta-heap {
+		compatible = "qcom,qseecom-ta-heap";
+		memory-region = <&qseecom_ta_mem>;
 	};
 
 	/*
