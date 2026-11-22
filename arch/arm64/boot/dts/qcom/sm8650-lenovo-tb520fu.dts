@@ -1611,6 +1611,13 @@
 &tlmm {
 	gpio-reserved-ranges = <36 4>, <74 1>;
 
+	fp_default: fp-default-state {
+		pins = "gpio91", "gpio92";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
 	pen_hall_default: pen-hall-default-state {
 		pins = "gpio177";
 		function = "gpio";
@@ -1877,4 +1884,24 @@
 
 &xo_board {
 	clock-frequency = <76800000>;
+};
+
+/*
+ * Optical Goodix under the display. The secure app goodixfp64 owns the SPI
+ * bus; this node is only the supply, reset and finger interrupt.
+ */
+/ {
+	fingerprint {
+		compatible = "goodix,gf3626";
+
+		interrupt-parent = <&tlmm>;
+		interrupts = <92 IRQ_TYPE_EDGE_RISING>;
+
+		reset-gpios = <&tlmm 91 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&vreg_l9b_2p96>;
+		firmware-name = "goodixfp64";
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&fp_default>;
+	};
 };
