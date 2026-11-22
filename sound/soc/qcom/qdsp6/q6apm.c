@@ -246,15 +246,18 @@ int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
 {
 	gpr_device_t *gdev = apm->gdev;
 
-	return audioreach_send_cmd_sync(&gdev->dev, gdev, &apm->result, &apm->lock,
-					NULL, &apm->wait, pkt, rsp_opcode);
+	return audioreach_send_cmd_sync_timeout(&gdev->dev, gdev, &apm->result,
+						&apm->lock, NULL, &apm->wait, pkt,
+						rsp_opcode, 5 * HZ, apm->quiet_cmd);
 }
+
+static int audioreach_graph_mgmt_cmd(struct audioreach_graph *graph, uint32_t opcode);
 
 static struct audioreach_graph *q6apm_get_audioreach_graph(struct q6apm *apm, uint32_t graph_id)
 {
 	struct audioreach_graph_info *info;
 	struct audioreach_graph *graph;
-	int id, ret;
+	int id;
 
 	mutex_lock(&apm->lock);
 	graph = idr_find(&apm->graph_idr, graph_id);
@@ -299,17 +302,35 @@ static struct audioreach_graph *q6apm_get_audioreach_graph(struct q6apm *apm, ui
 
 	kref_init(&graph->refcount);
 
-	ret = q6apm_send_cmd_sync(apm, graph->graph, 0);
-	if (ret) {
+	/*
+	 * A rejected open can leave the subgraph allocated in the DSP, so the
+	 * next open fails the same way. Close it and try again before giving up.
+	 */
+	{
+		int attempt;
+		int rc = -EINVAL;
+
+		for (attempt = 0; attempt < 3; attempt++) {
+			apm->quiet_cmd = true;
+			rc = q6apm_send_cmd_sync(apm, graph->graph, 0);
+			if (rc == -EINVAL)
+				audioreach_graph_mgmt_cmd(graph, APM_CMD_GRAPH_CLOSE);
+			apm->quiet_cmd = false;
+			if (!rc)
+				return graph;
+			if (rc != -EINVAL)
+				break;
+			msleep(50);
+		}
+
+		dev_err(apm->dev, "DSP rejected graph %u: %d\n", graph_id, rc);
 		mutex_lock(&apm->lock);
 		idr_remove(&apm->graph_idr, graph_id);
 		mutex_unlock(&apm->lock);
 		kfree(graph->graph);
 		kfree(graph);
-		return ERR_PTR(ret);
+		return ERR_PTR(rc);
 	}
-
-	return graph;
 }
 
 static int audioreach_graph_mgmt_cmd(struct audioreach_graph *graph, uint32_t opcode)
@@ -362,12 +383,28 @@ static void q6apm_put_audioreach_graph(struct kref *ref)
 
 static int q6apm_get_apm_state(struct q6apm *apm)
 {
-	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(0,
-								APM_CMD_GET_SPF_STATE, 0);
+	gpr_device_t *gdev = apm->gdev;
+	struct gpr_pkt *pkt;
+	int ret;
+
+	if (apm->state > 0)
+		return apm->state;
+
+	pkt = audioreach_alloc_apm_cmd_pkt(0, APM_CMD_GET_SPF_STATE, 0);
 	if (IS_ERR(pkt))
 		return PTR_ERR(pkt);
 
-	q6apm_send_cmd_sync(apm, pkt, APM_CMD_RSP_GET_SPF_STATE);
+	/*
+	 * A short wait. The audio service often NACKs or drops the first
+	 * query; a 5s block here stalls every sound driver behind it.
+	 */
+	ret = audioreach_send_cmd_sync_timeout(&gdev->dev, gdev, &apm->result,
+					       &apm->lock, NULL, &apm->wait, pkt,
+					       APM_CMD_RSP_GET_SPF_STATE,
+					       msecs_to_jiffies(250), true);
+	kfree(pkt);
+	if (ret)
+		return ret;
 
 	return apm->state;
 }
@@ -965,7 +1002,8 @@ struct q6apm_graph *q6apm_graph_open(struct device *dev, q6apm_cb cb,
 
 	ar_graph = q6apm_get_audioreach_graph(apm, graph_id);
 	if (IS_ERR(ar_graph)) {
-		dev_err(dev, "No graph found with id %d\n", graph_id);
+		dev_err(dev, "Failed to open graph %d: %ld\n", graph_id,
+			PTR_ERR(ar_graph));
 		return ERR_CAST(ar_graph);
 	}
 
@@ -1124,7 +1162,19 @@ static int apm_probe(gpr_device_t *gdev)
 
 	g_apm = apm;
 
-	q6apm_get_apm_state(apm);
+	/*
+	 * Ask SPF for its state, but do not hold probe for the old 5s timeout.
+	 * A NACK or a late service comes back on a later prm check.
+	 */
+	for (ret = 0; ret < 8 && apm->state <= 0; ret++) {
+		int state = q6apm_get_apm_state(apm);
+
+		if (state >= 0 || state == -EINVAL)
+			break;
+		msleep(100);
+	}
+	if (apm->state <= 0)
+		dev_info(dev, "APM SPF state not available yet\n");
 
 	ret = snd_soc_register_component(dev, &q6apm_audio_component, NULL, 0);
 	if (ret < 0) {
@@ -1185,9 +1235,10 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
 		case APM_CMD_GRAPH_FLUSH:
 		case APM_CMD_GRAPH_STOP:
 		case APM_CMD_SET_CFG:
+		case APM_CMD_GET_SPF_STATE:
 			apm->result.opcode = result->opcode;
 			apm->result.status = result->status;
-			if (result->status)
+			if (result->status && !apm->quiet_cmd)
 				dev_err(dev, "Error (%d) Processing 0x%08x cmd\n", result->status,
 					result->opcode);
 			wake_up(&apm->wait);

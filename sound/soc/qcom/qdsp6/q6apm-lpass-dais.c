@@ -4,6 +4,7 @@
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
 #include <linux/clk.h>
 #include <linux/err.h>
+#include <linux/idr.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/device.h>
@@ -225,6 +226,32 @@ static int q6apm_lpass_dai_trigger(struct snd_pcm_substream *substream, int cmd,
 	return ret;
 }
 
+/*
+ * Device graphs are rejected by the DSP until a stream mixer connects them.
+ * Probing the PCM before that link exists is not a broken graph.
+ */
+static int q6apm_backend_routed(struct snd_soc_dai *dai)
+{
+	struct q6apm *apm = dev_get_drvdata(dai->dev->parent);
+	struct audioreach_graph_info *info;
+	bool routed;
+
+	if (!apm)
+		return -ENODEV;
+
+	mutex_lock(&apm->lock);
+	info = idr_find(&apm->graph_info_idr, dai->id);
+	routed = info && info->src_mod_inst_id && info->dst_mod_inst_id;
+	mutex_unlock(&apm->lock);
+
+	if (!info)
+		return 0;
+	if (!routed)
+		return -EPROBE_DEFER;
+
+	return 0;
+}
+
 static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
 {
 	struct q6apm_lpass_dai_data *dai_data = dev_get_drvdata(dai->dev);
@@ -244,6 +271,18 @@ static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct s
 	 * graph, so sequence for playback and capture will be different
 	 */
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && dai_data->graph[dai->id] == NULL) {
+		/*
+		 * Mixer power-up prepares this DAI before hw_params has programmed
+		 * the TDM slots and bit clock. The DSP rejects that open.
+		 */
+		if (dai->id >= PRIMARY_TDM_RX_0 && dai->id <= QUINARY_TDM_TX_7 &&
+		    !cfg->nslots_per_frame)
+			return -EPROBE_DEFER;
+
+		rc = q6apm_backend_routed(dai);
+		if (rc)
+			return rc;
+
 		graph = q6apm_graph_open(dai->dev, NULL, dai->dev, graph_id, substream->stream);
 		if (IS_ERR(graph)) {
 			dev_err(dai->dev, "Failed to open graph (%d)\n", graph_id);
