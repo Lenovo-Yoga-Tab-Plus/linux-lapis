@@ -248,12 +248,20 @@ static const struct rtc_class_ops efi_rtc_ops = {
 static int __init efi_rtc_probe(struct platform_device *dev)
 {
 	struct rtc_device *rtc;
+	struct rtc_time tm;
 	efi_time_t eft;
 	efi_time_cap_t cap;
 	efi_bool_t enabled, pending;
 
 	/* First check if the RTC is usable */
 	if (efi.get_time(&eft, &cap) != EFI_SUCCESS)
+		return -ENODEV;
+
+	/*
+	 * A placeholder EFI GetTime can return success with day 0. Registering
+	 * that clock makes hctosys fail on rtc0, so leave rtc0 to the PMIC.
+	 */
+	if (!convert_from_efi_time(&eft, &tm))
 		return -ENODEV;
 
 	rtc = devm_rtc_allocate_device(&dev->dev);
