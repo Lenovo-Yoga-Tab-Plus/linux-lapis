@@ -1327,7 +1327,7 @@
 		dovdd-supply = <&camera_ldo7>;
 		avdd-supply = <&camera_ldo4>;
 		dvdd-supply = <&camera_ldo1>;
-		flash-leds = <&rear_flash_yellow>, <&rear_flash_white>;
+		flash-leds = <&rear_flash>;
 		lens-focus = <&main_camera_lens>;
 
 		port {
@@ -1389,28 +1389,18 @@
 };
 
 /*
- * Rear camera flash / torch on PM8550 (stock qcom,flash_led@ee00). Useful as a
- * flashlight once leds-qcom-flash loads; full camera (CAMSS + sensors) is still
- * a separate bring-up.
+ * Rear torch on PM8550. The vendor camera uses flash channels 0 and 3
+ * together (torch_0 + torch_3, switch mask 0x09). Channels 1 and 2 are
+ * the other pair and are not the back torch.
  */
 &pm8550_flash {
 	status = "okay";
 
-	rear_flash_yellow: led-0 {
-		function = LED_FUNCTION_FLASH;
-		color = <LED_COLOR_ID_YELLOW>;
-		led-sources = <1>;
-		led-max-microamp = <500000>;
-		flash-max-microamp = <1500000>;
-		flash-max-timeout-us = <1280000>;
-		function-enumerator = <0>;
-	};
-
-	rear_flash_white: led-1 {
+	rear_flash: led-0 {
 		function = LED_FUNCTION_FLASH;
 		color = <LED_COLOR_ID_WHITE>;
-		led-sources = <2>;
-		led-max-microamp = <500000>;
+		led-sources = <1 4>;
+		led-max-microamp = <400000>;
 		flash-max-microamp = <1500000>;
 		flash-max-timeout-us = <1280000>;
 	};
