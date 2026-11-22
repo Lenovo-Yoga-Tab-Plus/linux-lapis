@@ -39,6 +39,7 @@ obj-$(CONFIG_BATTERY_LENOVO_YOGA_C630) += lenovo_yoga_c630_battery.o
 obj-$(CONFIG_BATTERY_PMU)	+= pmu_battery.o
 obj-$(CONFIG_BATTERY_QCOM_BATTMGR)	+= qcom_battmgr.o
 obj-$(CONFIG_CHARGER_CAIHONG_PEN)	+= caihong_pen_power.o
+obj-$(CONFIG_CHARGER_LENOVO_TB520FU_PEN)	+= lenovo_tb520fu_pen.o
 obj-$(CONFIG_CHARGER_SC8547_CAIHONG)	+= sc8547_cp.o
 sc8547_cp-y				:= sc8547.o
 obj-$(CONFIG_BATTERY_OLPC)	+= olpc_battery.o
