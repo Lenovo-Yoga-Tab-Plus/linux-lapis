@@ -15,6 +15,7 @@
 #include <linux/mutex.h>
 #include <linux/property.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/spi/spi.h>
 #include <linux/workqueue.h>
 #include <drm/drm_panel.h>
@@ -48,8 +49,15 @@
 #define NVT_RESET_STATE_MAX 0xaf
 #define NVT_CMD_SLEEP 0x11
 #define NVT_EXT_CMD 0x7f
+#define NVT_CMD_SUPPORT_PEN 0x7b
 #define NVT_PEN_VIBRATOR_ON 0x16
 #define NVT_PEN_VIBRATOR_OFF 0x17
+/* Firmware status packets: byte 1 carries ID 30, byte 2 the function page. */
+#define NVT_DATA_PROTOCOL 30
+#define NVT_FUNCPAGE_STYLUS 5
+#define NVT_STYLUS_LEAVE 0
+#define NVT_STYLUS_DETECT 1
+#define NVT_STYLUS_ENTER 2
 
 struct nvt_partition {
 	u32 bin, sram, size, crc;
@@ -74,10 +82,15 @@ struct nt36532e {
 	bool irq_enabled;
 	u8 fw_version, event_protocol;
 	u8 last_event[NVT_POINT_DATA_LEN + 1];
+	u8 pen_hit[NVT_POINT_DATA_LEN + 1];
+	bool pen_hit_valid;
+	u8 active_hdr[16];
 	u64 irq_count, event_reads, touch_frames, touch_contacts;
 	u64 spi_errors, checksum_errors, out_of_range, boot_events;
 	u64 pen_packets, pen_reports, pen_checksum_errors, pen_out_of_range;
 	u64 pen_unknown_formats;
+	u64 stylus_detects, stylus_enters, stylus_leaves;
+	int fw_pen_state;
 	u16 pen_x, pen_y, pen_pressure, pen_distance;
 	u8 pen_format, pen_buttons;
 	bool pen_in_range, pen_contact;
@@ -589,6 +602,11 @@ static void nvt_report_pen(struct nt36532e *ts, const u8 *d)
 		ts->pen_checksum_errors++;
 		return;
 	}
+	if (d[66] != 0xff ||
+	    memchr_inv(d + 67, 0xff, NVT_PEN_DATA_LEN - 2)) {
+		memcpy(ts->pen_hit, d, sizeof(ts->pen_hit));
+		ts->pen_hit_valid = true;
+	}
 	if (d[66] == 0xff || d[66] == 0xf0) {
 		/* No pen, or an ID packet without coordinates (vendor behavior). */
 		nvt_pen_release(ts);
@@ -636,11 +654,11 @@ static void nvt_report_pen(struct nt36532e *ts, const u8 *d)
 	input_sync(ts->pen);
 }
 
-/* Vendor pencil_connect types: 0 off, 1 Havon, 2 Maxeye, 3 Maxeye 2nd,
- * 4 Sunwoda, 5 Maxeye 3rd. A retail model name is not this protocol ID.
- * Called with the device mutex held so IRQ reads cannot change the page.
+/* Called with the device mutex held so IRQ reads cannot change the page.
+ * Lenovo's NT36XXX driver enables the Tab Pen with host command 0x7B.
+ * Status 0 disables it, 1 reports the pen, 2 starts BLE pairing, 3 stops it.
  */
-static int nvt_send_pen_command(struct nt36532e *ts, u8 command)
+static int nvt_host_command(struct nt36532e *ts, u8 command, u8 argument)
 {
 	u8 buf[3] = { 0 };
 	int ret, attempt;
@@ -649,14 +667,12 @@ static int nvt_send_pen_command(struct nt36532e *ts, u8 command)
 	if (ret)
 		return ret;
 	for (attempt = 0; attempt < 5; attempt++) {
-		if (buf[1] != NVT_EXT_CMD) {
-			buf[0] = NVT_EVENT_HOST_CMD;
-			buf[1] = NVT_EXT_CMD;
-			buf[2] = command;
-			ret = nvt_spi_write(ts, buf, sizeof(buf));
-			if (ret)
-				return ret;
-		}
+		buf[0] = NVT_EVENT_HOST_CMD;
+		buf[1] = command;
+		buf[2] = argument;
+		ret = nvt_spi_write(ts, buf, sizeof(buf));
+		if (ret)
+			return ret;
 		msleep(20);
 		buf[0] = NVT_EVENT_HOST_CMD;
 		buf[1] = 0xff;
@@ -669,13 +685,16 @@ static int nvt_send_pen_command(struct nt36532e *ts, u8 command)
 	return -ETIMEDOUT;
 }
 
-static int nvt_set_pen_scan(struct nt36532e *ts, unsigned int type)
+static int nvt_send_pen_command(struct nt36532e *ts, u8 command)
 {
-	static const u8 commands[] = { 0x11, 0x10, 0x12, 0x13, 0x15, 0x18 };
+	return nvt_host_command(ts, NVT_EXT_CMD, command);
+}
 
-	if (type >= ARRAY_SIZE(commands))
+static int nvt_set_pen_support(struct nt36532e *ts, unsigned int status)
+{
+	if (status > 3)
 		return -EINVAL;
-	return nvt_send_pen_command(ts, commands[type]);
+	return nvt_host_command(ts, NVT_CMD_SUPPORT_PEN, status);
 }
 
 static void nvt_report_touch(struct nt36532e *ts, const u8 *d)
@@ -719,6 +738,35 @@ static void nvt_report_touch(struct nt36532e *ts, const u8 *d)
 	input_sync(ts->input);
 }
 
+/*
+ * The firmware announces a nearby stylus (DETECT) and later confirms that pen
+ * scanning runs (ENTER). The panel only scans for the pen at 120, 60 and
+ * 30 Hz, so on DETECT the vendor display stack drops to one of those rates.
+ * Userspace gets the same hint here as a uevent.
+ */
+static bool nvt_stylus_state(struct nt36532e *ts, const u8 *d)
+{
+	char *envp[] = { "NT36532E_PEN=detect", NULL };
+
+	if ((d[1] >> 3) != NVT_DATA_PROTOCOL || d[2] != NVT_FUNCPAGE_STYLUS)
+		return false;
+	switch (d[3]) {
+	case NVT_STYLUS_DETECT:
+		ts->stylus_detects++;
+		kobject_uevent_env(&ts->spi->dev.kobj, KOBJ_CHANGE, envp);
+		break;
+	case NVT_STYLUS_ENTER:
+		ts->stylus_enters++;
+		ts->fw_pen_state = 1;
+		break;
+	case NVT_STYLUS_LEAVE:
+		ts->stylus_leaves++;
+		ts->fw_pen_state = 0;
+		break;
+	}
+	return true;
+}
+
 static void nvt_process_event(struct nt36532e *ts)
 {
 	const u8 *d = ts->last_event;
@@ -730,7 +778,12 @@ static void nvt_process_event(struct nt36532e *ts)
 		ts->boot_events++;
 		return;
 	}
+	if (memchr_inv(d + 1, 0xff, 16))
+		memcpy(ts->active_hdr, d + 1, sizeof(ts->active_hdr));
 	if (nvt_point_checksum(d)) {
+		/* A status packet carries no contacts and no pen coordinates. */
+		if (nvt_stylus_state(ts, d))
+			return;
 		nvt_report_touch(ts, d);
 	} else {
 		ts->checksum_errors++;
@@ -815,7 +868,7 @@ static ssize_t pen_scan_store(struct device *dev, struct device_attribute *attr,
 	ret = kstrtouint(buf, 0, &type);
 	if (ret)
 		return ret;
-	if (type > 5)
+	if (type > 3)
 		return -EINVAL;
 	mutex_lock(&ts->lock);
 	if (!ts->pen_support)
@@ -823,7 +876,7 @@ static ssize_t pen_scan_store(struct device *dev, struct device_attribute *attr,
 	else if (!ts->irq_enabled)
 		ret = -EBUSY;
 	else {
-		ret = nvt_set_pen_scan(ts, type);
+		ret = nvt_set_pen_support(ts, type);
 		ts->pen_command_error = ret;
 		ts->pen_vibrator = -1;
 		/* An absent ACK leaves the applied controller state uncertain. */
@@ -889,23 +942,47 @@ static ssize_t pen_stats_show(struct device *dev, struct device_attribute *attr,
 		"checksum_errors=%llu out_of_range=%llu unknown_formats=%llu "
 		"format=%02x in_range=%u contact=%u raw_x=%u raw_y=%u "
 		"pressure=%u distance=%u buttons=%u max_pressure=%u "
-		"vibrator=%d vibrator_error=%d\n",
+		"vibrator=%d vibrator_error=%d fw_pen_state=%d "
+		"stylus_detects=%llu stylus_enters=%llu stylus_leaves=%llu "
+		"active=%*ph\n",
 		ts->pen_scan_type, ts->pen_command_error, ts->pen_packets,
 		ts->pen_reports, ts->pen_checksum_errors, ts->pen_out_of_range,
 		ts->pen_unknown_formats, ts->pen_format, ts->pen_in_range,
 		ts->pen_contact, ts->pen_x, ts->pen_y, ts->pen_pressure,
 		ts->pen_distance, ts->pen_buttons, ts->pen_max_pressure,
-		ts->pen_vibrator, ts->pen_vibrator_error);
+		ts->pen_vibrator, ts->pen_vibrator_error, ts->fw_pen_state,
+		ts->stylus_detects, ts->stylus_enters, ts->stylus_leaves,
+		(int)sizeof(ts->active_hdr), ts->active_hdr);
 	mutex_unlock(&ts->lock);
 	return len;
 }
 static DEVICE_ATTR_RO(pen_stats);
+
+static ssize_t pen_frame_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct nt36532e *ts = dev_get_drvdata(dev);
+	ssize_t len = 0;
+	int i;
+
+	mutex_lock(&ts->lock);
+	len += sysfs_emit_at(buf, len, "hit=%u\n", ts->pen_hit_valid);
+	for (i = 0; i < 108 && len < PAGE_SIZE - 4; i++)
+		len += sysfs_emit_at(buf, len, "%02x%s", ts->pen_hit[i],
+				     (i % 16) == 15 ? "\n" : " ");
+	if (len && buf[len - 1] != '\n')
+		len += sysfs_emit_at(buf, len, "\n");
+	mutex_unlock(&ts->lock);
+	return len;
+}
+static DEVICE_ATTR_RO(pen_frame);
 
 static struct attribute *nvt_attrs[] = {
 	&dev_attr_touch_stats.attr,
 	&dev_attr_pen_scan.attr,
 	&dev_attr_pen_vibrator.attr,
 	&dev_attr_pen_stats.attr,
+	&dev_attr_pen_frame.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(nvt);
@@ -937,7 +1014,13 @@ static int nvt_input_init(struct nt36532e *ts)
 	if (!ts->pen)
 		return -ENOMEM;
 	ts->pen->name = "Novatek NT36532E Pen";
-	ts->pen->id.bustype = BUS_SPI;
+	/*
+	 * libwacom matches this pen as i2c:0001:0006. BUS_SPI makes the
+	 * desktop treat the stylus as a mouse. The panel itself stays SPI.
+	 */
+	ts->pen->id.bustype = BUS_I2C;
+	ts->pen->id.vendor = 0x0001;
+	ts->pen->id.product = 0x0006;
 	input_set_abs_params(ts->pen, ABS_X, 0, ts->max_x - 1, 0, 0);
 	input_set_abs_params(ts->pen, ABS_Y, 0, ts->max_y - 1, 0, 0);
 	input_set_abs_params(ts->pen, ABS_PRESSURE, 0, ts->pen_max_pressure, 0,
@@ -1003,6 +1086,7 @@ static void nvt_resume_work(struct work_struct *work)
 		goto out;
 	ts->starts++;
 	ts->pen_vibrator = -1;
+	ts->fw_pen_state = 0;
 	nvt_hw_reset(ts);
 	if (!ts->detected) {
 		ret = nvt_detect(ts);
@@ -1020,15 +1104,25 @@ static void nvt_resume_work(struct work_struct *work)
 			ts->starts, ret);
 		goto out;
 	}
-	if (ts->pen_scan_type >= 0) {
-		ts->pen_command_error = nvt_set_pen_scan(ts, ts->pen_scan_type);
+	nvt_start_events(ts);
+	/*
+	 * The controller only keeps the pen mode across a live scan. Lenovo
+	 * sends 0x7B/1 after the firmware is already running, not before the
+	 * first interrupt is armed.
+	 */
+	if (ts->pen_support) {
+		unsigned int pen_status = ts->pen_scan_type < 0 ?
+						  1 : ts->pen_scan_type;
+
+		ts->pen_command_error = nvt_set_pen_support(ts, pen_status);
 		if (ts->pen_command_error) {
-			dev_warn(dev, "pen scan restore failed: %d\n",
+			dev_warn(dev, "pen support command failed: %d\n",
 				 ts->pen_command_error);
 			ts->pen_scan_type = -1;
+		} else {
+			ts->pen_scan_type = pen_status;
 		}
 	}
-	nvt_start_events(ts);
 	dev_info(dev,
 		 "touch start %llu complete: firmware ready, IRQ %d armed\n",
 		 ts->starts, ts->spi->irq);
