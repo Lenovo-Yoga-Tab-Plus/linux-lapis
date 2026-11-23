@@ -233,9 +233,16 @@ static int c_show(struct seq_file *m, void *v)
 	 * "processor".  Give glibc what it expects.
 	 */
 	seq_printf(m, "processor\t: %d\n", cpu);
+	/*
+	 * Settings reads this line for the Processor row. A bind mount over
+	 * /proc/cpuinfo would supply it too, and that mount stops Flatpak
+	 * from creating a procfs inside its user namespace.
+	 */
 	if (compat)
 		seq_printf(m, "model name\t: ARMv8 Processor rev %d (%s)\n",
 			   MIDR_REVISION(midr), COMPAT_ELF_PLATFORM);
+	else
+		seq_puts(m, "model name\t: Snapdragon 8 Gen 3\n");
 
 	seq_printf(m, "BogoMIPS\t: %lu.%02lu\n",
 		   loops_per_jiffy / (500000UL/HZ),
