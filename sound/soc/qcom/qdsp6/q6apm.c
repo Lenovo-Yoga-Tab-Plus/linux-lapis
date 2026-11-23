@@ -241,14 +241,26 @@ out_release:
 	return ret;
 }
 
+static int q6apm_send_cmd_sync_flags(struct q6apm *apm, const struct gpr_pkt *pkt,
+				     uint32_t rsp_opcode, bool quiet)
+{
+	gpr_device_t *gdev = apm->gdev;
+	int rc;
+
+	rc = audioreach_send_cmd_sync_timeout(&gdev->dev, gdev, &apm->result,
+					      &apm->lock, NULL, &apm->wait, pkt,
+					      rsp_opcode, 5 * HZ, quiet);
+	if (rc == -ETIMEDOUT && !quiet)
+		dev_err(&gdev->dev, "CMD timeout for [%x] opcode\n",
+			pkt->hdr.opcode);
+
+	return rc;
+}
+
 int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
 			uint32_t rsp_opcode)
 {
-	gpr_device_t *gdev = apm->gdev;
-
-	return audioreach_send_cmd_sync_timeout(&gdev->dev, gdev, &apm->result,
-						&apm->lock, NULL, &apm->wait, pkt,
-						rsp_opcode, 5 * HZ, apm->quiet_cmd);
+	return q6apm_send_cmd_sync_flags(apm, pkt, rsp_opcode, false);
 }
 
 static int audioreach_graph_mgmt_cmd(struct audioreach_graph *graph, uint32_t opcode);
@@ -311,11 +323,9 @@ static struct audioreach_graph *q6apm_get_audioreach_graph(struct q6apm *apm, ui
 		int rc = -EINVAL;
 
 		for (attempt = 0; attempt < 3; attempt++) {
-			apm->quiet_cmd = true;
-			rc = q6apm_send_cmd_sync(apm, graph->graph, 0);
+			rc = q6apm_send_cmd_sync_flags(apm, graph->graph, 0, true);
 			if (rc == -EINVAL)
 				audioreach_graph_mgmt_cmd(graph, APM_CMD_GRAPH_CLOSE);
-			apm->quiet_cmd = false;
 			if (!rc)
 				return graph;
 			if (rc != -EINVAL)
@@ -1169,7 +1179,7 @@ static int apm_probe(gpr_device_t *gdev)
 	for (ret = 0; ret < 8 && apm->state <= 0; ret++) {
 		int state = q6apm_get_apm_state(apm);
 
-		if (state >= 0 || state == -EINVAL)
+		if (state > 0 || state == -EINVAL)
 			break;
 		msleep(100);
 	}
@@ -1238,9 +1248,6 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
 		case APM_CMD_GET_SPF_STATE:
 			apm->result.opcode = result->opcode;
 			apm->result.status = result->status;
-			if (result->status && !apm->quiet_cmd)
-				dev_err(dev, "Error (%d) Processing 0x%08x cmd\n", result->status,
-					result->opcode);
 			wake_up(&apm->wait);
 			break;
 		case APM_CMD_SHARED_MEM_UNMAP_REGIONS:

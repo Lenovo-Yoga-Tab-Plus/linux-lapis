@@ -61,7 +61,6 @@ struct q6apm {
 	struct mutex cmd_lock;
 	struct mutex lock;
 	uint32_t state;
-	bool quiet_cmd;
 
 	struct list_head widget_list;
 	struct idr graph_idr;

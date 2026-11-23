@@ -75,8 +75,11 @@ static void rtc_hctosys(struct rtc_device *rtc)
 	/*
 	 * An unset PMIC counter reads back as 1971. Applying that would pull
 	 * the system clock off the time userspace restores on the next boot.
+	 * Other RTCs are left alone.
 	 */
-	if (tm.tm_year + 1900 < 2024) {
+	if (tm.tm_year + 1900 < 2024 && rtc->dev.parent &&
+	    of_device_is_compatible(rtc->dev.parent->of_node,
+				    "qcom,pmk8350-rtc")) {
 		err = -EINVAL;
 		goto err_read;
 	}

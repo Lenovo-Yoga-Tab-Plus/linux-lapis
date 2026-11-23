@@ -693,8 +693,10 @@ static int qseecom_tee_open_session(struct tee_context *ctx,
 
 	ret = qseecom_tee_session_add(ctxdata, app_id, app_gen, NULL,
 				      &arg->session);
-	if (ret)
+	if (ret) {
+		qseecom_tee_app_put(ctxdata->qtee, app_id, app_gen);
 		return ret;
+	}
 
 	arg->ret = 0;
 	arg->ret_origin = 0;
@@ -1484,7 +1486,7 @@ static int qseecom_tee_supp_load_app(struct tee_context *ctx,
 	u32 app_gen = 0;
 	struct qseecom_tee_context *ctxdata = ctx->data;
 	struct qseecom_tee *qtee = ctxdata->qtee;
-	struct device_node *heap_np, *mem_np;
+	struct device_node *heap_np = NULL, *mem_np = NULL;
 	struct reserved_mem *rmem = NULL;
 	char fw_name[QSEECOM_TEE_MAX_APP_NAME + sizeof(".mdt")];
 	char app_name[QSEECOM_TEE_MAX_APP_NAME];

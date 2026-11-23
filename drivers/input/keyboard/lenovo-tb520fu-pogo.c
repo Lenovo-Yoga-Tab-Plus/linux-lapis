@@ -23,6 +23,7 @@
 #include <linux/mutex.h>
 #include <linux/random.h>
 #include <linux/serdev.h>
+#include <linux/spinlock.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
@@ -121,6 +122,8 @@ struct tbkb {
 	struct mutex lock;
 	/* Serializes tx-en and frame writes on the shared line. */
 	struct mutex tx_lock;
+	/* stopped and scheduling the connect/plug work. */
+	spinlock_t sched_lock;
 	struct input_dev *keyboard;
 	struct input_dev *touchpad;
 	bool connected;
@@ -438,7 +441,8 @@ static void tbkb_handle_packet(struct tbkb *kb, const u8 *pkt, size_t len)
 
 	/* The cover stops syncing while idle, so only the plug sensor disconnects it. */
 	if (pkt[0] == TBKB_EVT_SYNC) {
-		if (!READ_ONCE(kb->stopped) && !kb->connected)
+		guard(spinlock_irqsave)(&kb->sched_lock);
+		if (!kb->stopped && !kb->connected)
 			schedule_work(&kb->connect_work);
 		return;
 	}
@@ -571,8 +575,11 @@ static irqreturn_t tbkb_plug_irq(int irq, void *data)
 {
 	struct tbkb *kb = data;
 
-	if (!READ_ONCE(kb->stopped))
-		mod_delayed_work(system_dfl_wq, &kb->plug_work, msecs_to_jiffies(50));
+	scoped_guard(spinlock_irqsave, &kb->sched_lock) {
+		if (!kb->stopped)
+			mod_delayed_work(system_dfl_wq, &kb->plug_work,
+					 msecs_to_jiffies(50));
+	}
 	return IRQ_HANDLED;
 }
 
@@ -580,7 +587,8 @@ static void tbkb_cleanup(void *data)
 {
 	struct tbkb *kb = data;
 
-	WRITE_ONCE(kb->stopped, true);
+	scoped_guard(spinlock_irqsave, &kb->sched_lock)
+		kb->stopped = true;
 	cancel_delayed_work_sync(&kb->plug_work);
 	cancel_work_sync(&kb->connect_work);
 	cancel_work_sync(&kb->led_work);
@@ -604,6 +612,7 @@ static int tbkb_probe(struct serdev_device *serdev)
 	kb->dev = dev;
 	mutex_init(&kb->lock);
 	mutex_init(&kb->tx_lock);
+	spin_lock_init(&kb->sched_lock);
 	INIT_WORK(&kb->connect_work, tbkb_connect_work);
 	INIT_WORK(&kb->led_work, tbkb_led_work);
 	INIT_DELAYED_WORK(&kb->plug_work, tbkb_plug_work);

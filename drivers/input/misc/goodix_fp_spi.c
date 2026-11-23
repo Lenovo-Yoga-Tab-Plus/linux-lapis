@@ -17,6 +17,7 @@
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/ioctl.h>
+#include <linux/kref.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -24,6 +25,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_wakeup.h>
 #include <linux/regulator/consumer.h>
+#include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <net/netlink.h>
 #include <net/sock.h>
@@ -117,10 +119,12 @@ struct gf_dev {
 	int irq;
 
 	struct mutex lock; /* open/release and IRQ-enable state */
+	struct kref kref;
 	bool opened;
 	bool irq_enabled;
 	bool device_available;
 	bool key_down;
+	bool removed;
 };
 
 static const struct gf_key_map {
@@ -336,6 +340,34 @@ static void gf_kernel_key_input(struct gf_dev *gf_dev, struct gf_key *gf_key)
 	}
 }
 
+static void gf_shutdown_open_locked(struct gf_dev *gf_dev)
+{
+	if (!gf_dev->opened)
+		return;
+
+	gpiod_set_value_cansleep(gf_dev->reset_gpiod, 1);
+	if (gf_dev->irq_enabled)
+		gf_disable_irq(gf_dev);
+	disable_irq_wake(gf_dev->irq);
+	free_irq(gf_dev->irq, gf_dev);
+	gf_dev->irq_enabled = false;
+	gf_dev->device_available = false;
+	regulator_disable(gf_dev->vdd);
+	gf_dev->opened = false;
+}
+
+static void gf_dev_free(struct kref *kref)
+{
+	struct gf_dev *gf_dev = container_of(kref, struct gf_dev, kref);
+
+	if (gf_dev->input)
+		input_unregister_device(gf_dev->input);
+	if (gf_dev->fp_wakelock)
+		wakeup_source_unregister(gf_dev->fp_wakelock);
+	mutex_destroy(&gf_dev->lock);
+	kfree(gf_dev);
+}
+
 static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct gf_dev *gf_dev = filp->private_data;
@@ -348,12 +380,19 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	if (_IOC_TYPE(cmd) != GF_IOC_MAGIC)
 		return -ENODEV;
 
+	mutex_lock(&gf_dev->lock);
+	if (gf_dev->removed) {
+		retval = -ENODEV;
+		goto out_unlock;
+	}
+
 	if (!gf_dev->device_available &&
 	    cmd != GF_IOC_ENABLE_POWER && cmd != GF_IOC_DISABLE_POWER) {
 		dev_dbg(gf_dev->dev,
 			"cmd %d, but sensor is powered off currently\n",
 			_IOC_NR(cmd));
-		return -ENODEV;
+		retval = -ENODEV;
+		goto out_unlock;
 	}
 
 	switch (cmd) {
@@ -372,16 +411,12 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	case GF_IOC_DISABLE_IRQ:
 		dev_dbg(gf_dev->dev, "GF_IOC_DISABLE_IRQ\n");
-		mutex_lock(&gf_dev->lock);
 		gf_disable_irq(gf_dev);
-		mutex_unlock(&gf_dev->lock);
 		break;
 
 	case GF_IOC_ENABLE_IRQ:
 		dev_dbg(gf_dev->dev, "GF_IOC_ENABLE_IRQ\n");
-		mutex_lock(&gf_dev->lock);
 		gf_enable_irq(gf_dev);
-		mutex_unlock(&gf_dev->lock);
 		break;
 
 	case GF_IOC_RESET:
@@ -444,6 +479,8 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		break;
 	}
 
+out_unlock:
+	mutex_unlock(&gf_dev->lock);
 	return retval;
 }
 
@@ -460,6 +497,11 @@ static int gf_open(struct inode *inode, struct file *filp)
 	int rc;
 
 	mutex_lock(&gf_dev->lock);
+
+	if (gf_dev->removed) {
+		rc = -ENODEV;
+		goto err_unlock;
+	}
 
 	if (gf_dev->opened) {
 		rc = -EBUSY;
@@ -494,6 +536,7 @@ static int gf_open(struct inode *inode, struct file *filp)
 
 	gf_dev->opened = true;
 	filp->private_data = gf_dev;
+	kref_get(&gf_dev->kref);
 	mutex_unlock(&gf_dev->lock);
 
 	nonseekable_open(inode, filp);
@@ -513,18 +556,9 @@ static int gf_release(struct inode *inode, struct file *filp)
 	struct gf_dev *gf_dev = filp->private_data;
 
 	mutex_lock(&gf_dev->lock);
-
-	gpiod_set_value_cansleep(gf_dev->reset_gpiod, 1);
-	if (gf_dev->irq_enabled)
-		gf_disable_irq(gf_dev);
-	disable_irq_wake(gf_dev->irq);
-	free_irq(gf_dev->irq, gf_dev);
-
-	gf_dev->device_available = false;
-	regulator_disable(gf_dev->vdd);
-	gf_dev->opened = false;
-
+	gf_shutdown_open_locked(gf_dev);
 	mutex_unlock(&gf_dev->lock);
+	kref_put(&gf_dev->kref, gf_dev_free);
 
 	return 0;
 }
@@ -544,27 +578,33 @@ static int gf_probe(struct platform_device *pdev)
 	size_t i;
 	int rc;
 
-	gf_dev = devm_kzalloc(dev, sizeof(*gf_dev), GFP_KERNEL);
+	gf_dev = kzalloc(sizeof(*gf_dev), GFP_KERNEL);
 	if (!gf_dev)
 		return -ENOMEM;
 
 	gf_dev->dev = dev;
+	kref_init(&gf_dev->kref);
 	platform_set_drvdata(pdev, gf_dev);
 	mutex_init(&gf_dev->lock);
 
 	gf_dev->reset_gpiod = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
-	if (IS_ERR(gf_dev->reset_gpiod))
-		return dev_err_probe(dev, PTR_ERR(gf_dev->reset_gpiod),
-				     "failed to get reset GPIO\n");
+	if (IS_ERR(gf_dev->reset_gpiod)) {
+		rc = dev_err_probe(dev, PTR_ERR(gf_dev->reset_gpiod),
+				   "failed to get reset GPIO\n");
+		goto err_free;
+	}
 
 	rc = gpiod_direction_output(gf_dev->reset_gpiod, 1);
-	if (rc)
-		return dev_err_probe(dev, rc,
-				     "failed to configure reset GPIO\n");
+	if (rc) {
+		dev_err_probe(dev, rc, "failed to configure reset GPIO\n");
+		goto err_free;
+	}
 
 	gf_dev->irq = platform_get_irq(pdev, 0);
-	if (gf_dev->irq < 0)
-		return gf_dev->irq;
+	if (gf_dev->irq < 0) {
+		rc = gf_dev->irq;
+		goto err_free;
+	}
 
 	/*
 	 * Which trusted application drives this sensor. Optional: the sensor
@@ -576,13 +616,18 @@ static int gf_probe(struct platform_device *pdev)
 		gf_dev->fw_name = NULL;
 
 	gf_dev->vdd = devm_regulator_get(dev, "vdd");
-	if (IS_ERR(gf_dev->vdd))
-		return dev_err_probe(dev, PTR_ERR(gf_dev->vdd),
-				     "failed to get vdd regulator\n");
+	if (IS_ERR(gf_dev->vdd)) {
+		rc = dev_err_probe(dev, PTR_ERR(gf_dev->vdd),
+				   "failed to get vdd regulator\n");
+		goto err_free;
+	}
 
-	gf_dev->input = devm_input_allocate_device(dev);
-	if (!gf_dev->input)
-		return -ENOMEM;
+	gf_dev->input = input_allocate_device();
+	if (!gf_dev->input) {
+		rc = -ENOMEM;
+		goto err_free;
+	}
+	gf_dev->input->dev.parent = dev;
 
 	for (i = 0; i < ARRAY_SIZE(maps); i++)
 		input_set_capability(gf_dev->input, maps[i].type,
@@ -590,13 +635,18 @@ static int gf_probe(struct platform_device *pdev)
 	gf_dev->input->name = GF_INPUT_NAME;
 
 	rc = input_register_device(gf_dev->input);
-	if (rc)
-		return dev_err_probe(dev, rc,
-				     "failed to register input device\n");
+	if (rc) {
+		input_free_device(gf_dev->input);
+		gf_dev->input = NULL;
+		dev_err_probe(dev, rc, "failed to register input device\n");
+		goto err_free;
+	}
 
 	gf_dev->fp_wakelock = wakeup_source_register(dev, "fp_wakelock");
-	if (!gf_dev->fp_wakelock)
-		return -ENOMEM;
+	if (!gf_dev->fp_wakelock) {
+		rc = -ENOMEM;
+		goto err_free;
+	}
 
 	device_init_wakeup(dev, true);
 
@@ -608,20 +658,35 @@ static int gf_probe(struct platform_device *pdev)
 	rc = misc_register(&gf_dev->misc);
 	if (rc) {
 		dev_err(dev, "failed to register misc device: %d\n", rc);
-		wakeup_source_unregister(gf_dev->fp_wakelock);
-		return rc;
+		goto err_free;
 	}
 
 	return 0;
+
+err_free:
+	kref_put(&gf_dev->kref, gf_dev_free);
+	return rc;
 }
 
 static void gf_remove(struct platform_device *pdev)
 {
 	struct gf_dev *gf_dev = platform_get_drvdata(pdev);
 
+	mutex_lock(&gf_dev->lock);
+	gf_dev->removed = true;
+	gf_shutdown_open_locked(gf_dev);
+	if (gf_dev->input) {
+		input_unregister_device(gf_dev->input);
+		gf_dev->input = NULL;
+	}
+	if (gf_dev->fp_wakelock) {
+		wakeup_source_unregister(gf_dev->fp_wakelock);
+		gf_dev->fp_wakelock = NULL;
+	}
+	mutex_unlock(&gf_dev->lock);
+
 	misc_deregister(&gf_dev->misc);
-	wakeup_source_unregister(gf_dev->fp_wakelock);
-	mutex_destroy(&gf_dev->lock);
+	kref_put(&gf_dev->kref, gf_dev_free);
 }
 
 static ssize_t firmware_name_show(struct device *dev,

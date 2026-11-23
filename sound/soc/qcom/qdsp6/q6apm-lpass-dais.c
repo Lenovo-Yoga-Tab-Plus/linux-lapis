@@ -247,7 +247,7 @@ static int q6apm_backend_routed(struct snd_soc_dai *dai)
 	if (!info)
 		return 0;
 	if (!routed)
-		return -EPROBE_DEFER;
+		return -EAGAIN;
 
 	return 0;
 }
@@ -277,7 +277,7 @@ static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct s
 		 */
 		if (dai->id >= PRIMARY_TDM_RX_0 && dai->id <= QUINARY_TDM_TX_7 &&
 		    !cfg->nslots_per_frame)
-			return -EPROBE_DEFER;
+			return -EAGAIN;
 
 		rc = q6apm_backend_routed(dai);
 		if (rc)
