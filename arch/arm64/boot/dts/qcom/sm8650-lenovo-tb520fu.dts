@@ -1905,3 +1905,12 @@
 		pinctrl-0 = <&fp_default>;
 	};
 };
+
+/*
+ * The PMIC counter has no epoch. Android stores (unix - raw) in the RTCInfo
+ * EFI variable and the driver applies it on read. The alarm IRQ stays with
+ * the kernel so suspend can wake from this RTC.
+ */
+&pmk8550_rtc {
+	qcom,uefi-rtc-info;
+};
