@@ -589,7 +589,19 @@ static int pm8xxx_rtc_probe_offset(struct pm8xxx_rtc *rtc_dd)
 		rtc_dd->use_uefi = false;
 	}
 
-	return pm8xxx_rtc_read_uefi_offset(rtc_dd);
+	/*
+	 * Android creates RTCInfo after the clock is known. A missing variable
+	 * used to fail probe and remove rtc0, so the offset could never be
+	 * stored. Keep the counter readable at offset 0 until userspace writes it.
+	 */
+	rc = pm8xxx_rtc_read_uefi_offset(rtc_dd);
+	if (rc == -ENOENT) {
+		dev_info(rtc_dd->dev, "UEFI RTCInfo is absent, keeping a zero offset\n");
+		rtc_dd->offset = 0;
+		return 0;
+	}
+
+	return rc;
 }
 
 static int pm8xxx_rtc_probe(struct platform_device *pdev)
