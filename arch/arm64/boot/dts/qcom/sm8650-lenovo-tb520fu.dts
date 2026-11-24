@@ -81,17 +81,10 @@
 	};
 
 	/*
-	 * Gunyah hypervisor placeholder for XBL/ABL dynamic overlay compatibility.
+	 * No /hypervisor node. Gunyah recovers the resource-manager
+	 * capabilities from XBL's merged tree (they change every boot), and
+	 * a node at this path makes userspace treat the tablet as a VM.
 	 */
-	hypervisor {
-		compatible = "qcom,gunyah-hypervisor-1.0",
-			     "qcom,gunyah-hypervisor", "simple-bus";
-		#address-cells = <2>;
-		#size-cells = <0>;
-
-		qcom,gh-watchdog {
-		};
-	};
 
 	gpio-keys {
 		compatible = "gpio-keys";
